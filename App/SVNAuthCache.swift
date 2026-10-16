@@ -1,34 +1,78 @@
 import Foundation
 import Security
 
-struct SVNCachedAuth {
-    var username: String
-    var password: String
-    var realm: String
-}
-
+/// Ensures Subversion can authenticate non-interactively when launched from this GUI app.
+///
+/// Terminal-saved credentials often use `passtype=keychain`. Ad-hoc signed apps cannot keep
+/// “Always Allow” on that keychain item, so every launch prompts again.
+/// After a one-time keychain read (user may enter the login password once), we rewrite the
+/// matching `~/.subversion/auth/svn.simple` entry to `passtype=simple` so later `svn` calls
+/// need no keychain access from this app.
 enum SVNAuthCache {
-    /// Loads username from `~/.subversion/auth` and password from the macOS keychain
-    /// (the same store the command-line `svn` client uses).
-    static func credentials(forWorkingCopy root: URL, svnBinary: String) -> SVNCachedAuth? {
-        guard let identity = repositoryIdentity(forWorkingCopy: root, svnBinary: svnBinary) else {
-            return credentialsMatchingHostHint(root.lastPathComponent)
+    /// Prepare auth cache for this working copy. Safe to call before every svn invocation.
+    static func prepare(forWorkingCopy root: URL, svnBinary: String) {
+        let identity = repositoryIdentity(forWorkingCopy: root, svnBinary: svnBinary)
+        let entries = readSimpleAuthEntries()
+        let matches: [SimpleAuthEntry]
+        if let identity {
+            matches = entries.filter {
+                $0.realm.contains(identity.uuid) || $0.realm.localizedCaseInsensitiveContains(identity.host)
+            }
+        } else {
+            let hint = root.lastPathComponent
+            matches = entries.filter { $0.realm.localizedCaseInsensitiveContains(hint) }
         }
-        if let match = credentials(matchingUUID: identity.uuid, host: identity.host) {
-            return match
+        for entry in matches {
+            migrateKeychainEntryIfNeeded(entry)
         }
-        return credentialsMatchingHostHint(identity.host)
     }
 
-    static func apply(to arguments: inout [String], auth: SVNCachedAuth?) {
-        guard let auth else { return }
-        // Insert after the subcommand (update/commit/status).
-        guard !arguments.isEmpty else { return }
-        arguments.insert(contentsOf: ["--username", auth.username, "--password", auth.password], at: 1)
+    // MARK: - Migration
+
+    private static func migrateKeychainEntryIfNeeded(_ entry: SimpleAuthEntry) {
+        if entry.passtype != "keychain", entry.password != nil {
+            return
+        }
+        guard let password = keychainPassword(service: entry.realm, account: entry.username),
+              !password.isEmpty else {
+            return
+        }
+        writeSimpleAuthFile(
+            at: entry.fileURL,
+            username: entry.username,
+            realm: entry.realm,
+            password: password
+        )
     }
+
+    private static func writeSimpleAuthFile(at url: URL, username: String, realm: String, password: String) {
+        func field(_ key: String, _ value: String) -> String {
+            "K \(key.utf8.count)\n\(key)\nV \(value.utf8.count)\n\(value)\n"
+        }
+        let body =
+            field("passtype", "simple")
+            + field("svn:realmstring", realm)
+            + field("username", username)
+            + field("password", password)
+            + "END\n"
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try body.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: url.path
+            )
+        } catch {
+            // Best effort; svn may still fail and surface auth errors.
+        }
+    }
+
+    // MARK: - Repository identity
 
     private struct RepoIdentity {
-        var url: String
         var uuid: String
         var host: String
     }
@@ -36,10 +80,11 @@ enum SVNAuthCache {
     private static func repositoryIdentity(forWorkingCopy root: URL, svnBinary: String) -> RepoIdentity? {
         let url = runShowItem(svnBinary: svnBinary, root: root, item: "url")
         let uuid = runShowItem(svnBinary: svnBinary, root: root, item: "repos-uuid")
-        guard let url, let uuid, let host = URL(string: url)?.host ?? URL(string: url.replacingOccurrences(of: "svn://", with: "http://"))?.host else {
-            return nil
-        }
-        return RepoIdentity(url: url, uuid: uuid, host: host)
+        guard let url, let uuid else { return nil }
+        let host = URL(string: url)?.host
+            ?? URL(string: url.replacingOccurrences(of: "svn://", with: "http://"))?.host
+        guard let host else { return nil }
+        return RepoIdentity(uuid: uuid, host: host)
     }
 
     private static func runShowItem(svnBinary: String, root: URL, item: String) -> String? {
@@ -68,31 +113,14 @@ enum SVNAuthCache {
         return (text?.isEmpty == false) ? text : nil
     }
 
-    private static func credentials(matchingUUID uuid: String, host: String) -> SVNCachedAuth? {
-        for entry in readSimpleAuthEntries() {
-            let realm = entry.realm
-            guard realm.contains(uuid) || realm.localizedCaseInsensitiveContains(host) else { continue }
-            guard let password = keychainPassword(service: realm, account: entry.username) else { continue }
-            return SVNCachedAuth(username: entry.username, password: password, realm: realm)
-        }
-        return nil
-    }
-
-    private static func credentialsMatchingHostHint(_ hint: String) -> SVNCachedAuth? {
-        let needle = hint.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !needle.isEmpty else { return nil }
-        for entry in readSimpleAuthEntries() where entry.realm.localizedCaseInsensitiveContains(needle) {
-            if let password = keychainPassword(service: entry.realm, account: entry.username) {
-                return SVNCachedAuth(username: entry.username, password: password, realm: entry.realm)
-            }
-        }
-        return nil
-    }
+    // MARK: - Auth file parsing
 
     private struct SimpleAuthEntry {
+        var fileURL: URL
         var username: String
         var realm: String
         var passtype: String
+        var password: String?
     }
 
     private static func readSimpleAuthEntries() -> [SimpleAuthEntry] {
@@ -108,7 +136,13 @@ enum SVNAuthCache {
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         let map = parseHashFile(text)
         guard let username = map["username"], let realm = map["svn:realmstring"] else { return nil }
-        return SimpleAuthEntry(username: username, realm: realm, passtype: map["passtype"] ?? "")
+        return SimpleAuthEntry(
+            fileURL: url,
+            username: username,
+            realm: realm,
+            passtype: map["passtype"] ?? "",
+            password: map["password"]
+        )
     }
 
     /// Parses Subversion's `K <len> / key / V <len> / value` hash files.
@@ -128,7 +162,6 @@ enum SVNAuthCache {
                     if length == 0 {
                         value = ""
                     } else if index < lines.count {
-                        // Values are a single line for username/realm/passtype.
                         value = lines[index]
                         index += 1
                     }

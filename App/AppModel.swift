@@ -17,7 +17,7 @@ final class AppModel: ObservableObject {
     private var commitController: CommitWindowController?
     private var authHint = """
     请先在终端对这个版本库成功操作一次，让 Subversion 记住凭据；本版本不保管密码。
-    若终端里已经可以操作，但这里仍提示无法取得用户名或密码：第一次使用时若弹出「钥匙串访问」授权，请选择「始终允许」，以便本应用读取终端已保存的 Subversion 凭据。
+    若弹出「钥匙串访问」：输入登录密码并点「允许」即可（只需一次）。本应用会把该版本库凭据改存为 Subversion 本地缓存，之后不再访问钥匙串。因本机使用临时签名，「始终允许」通常无法记住。
     """
 
     private init() {
@@ -169,11 +169,17 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func svnArguments(_ base: [String], workingDirectory: URL, svn: String) -> [String] {
-        var args = base
-        let auth = SVNAuthCache.credentials(forWorkingCopy: workingDirectory, svnBinary: svn)
-        SVNAuthCache.apply(to: &args, auth: auth)
-        return args
+    private func prepareAuthThenRun(
+        svn: String,
+        workingDirectory: URL,
+        prepareTitle: String,
+        work: @escaping () -> Void
+    ) {
+        // Keychain prompt (if any) must run off the main thread so the dialog can appear.
+        DispatchQueue.global(qos: .userInitiated).async {
+            SVNAuthCache.prepare(forWorkingCopy: workingDirectory, svnBinary: svn)
+            DispatchQueue.main.async(execute: work)
+        }
     }
 
     private func startUpdate(svn: String, paths: [String], workingDirectory: URL) {
@@ -183,30 +189,33 @@ final class AppModel: ObservableObject {
         })
         busyReason = "update"
 
-        let args = svnArguments(["update", "--non-interactive", "--"] + paths, workingDirectory: workingDirectory, svn: svn)
-        runner.run(svnBinary: svn, arguments: args, workingDirectory: workingDirectory, onOutput: { [weak controller] chunk in
-            controller?.append(chunk)
-        }, completion: { [weak self] result in
-            Task { @MainActor in
-                guard let self else { return }
-                self.busyReason = nil
-                let title: String
-                if result.cancelled {
-                    title = "更新已取消"
-                } else if result.exitCode == 0 {
-                    title = "更新完成"
-                } else {
-                    title = "更新失败"
+        prepareAuthThenRun(svn: svn, workingDirectory: workingDirectory, prepareTitle: "正在更新") { [weak self] in
+            guard let self else { return }
+            let args = ["update", "--non-interactive", "--"] + paths
+            self.runner.run(svnBinary: svn, arguments: args, workingDirectory: workingDirectory, onOutput: { [weak controller] chunk in
+                controller?.append(chunk)
+            }, completion: { [weak self] result in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.busyReason = nil
+                    let title: String
+                    if result.cancelled {
+                        title = "更新已取消"
+                    } else if result.exitCode == 0 {
+                        title = "更新完成"
+                    } else {
+                        title = "更新失败"
+                    }
+                    if result.exitCode != 0 && !result.cancelled {
+                        let body = self.appendAuthHintIfNeeded(to: controller.bodyText)
+                        controller.replaceBody(body)
+                    }
+                    controller.finish(title: title)
+                    OperationLog.append(action: "更新", exitCode: Int(result.exitCode), paths: paths, output: result.output)
+                    self.notify(title: title)
                 }
-                if result.exitCode != 0 && !result.cancelled {
-                    let body = self.appendAuthHintIfNeeded(to: controller.bodyText)
-                    controller.replaceBody(body)
-                }
-                controller.finish(title: title)
-                OperationLog.append(action: "更新", exitCode: Int(result.exitCode), paths: paths, output: result.output)
-                self.notify(title: title)
-            }
-        })
+            })
+        }
     }
 
     private func startCommitFlow(svn: String, paths: [String], workingDirectory: URL) {
@@ -216,44 +225,43 @@ final class AppModel: ObservableObject {
         })
         busyReason = "status"
 
-        let args = svnArguments(
-            ["status", "--xml", "--non-interactive", "--"] + paths,
-            workingDirectory: workingDirectory,
-            svn: svn
-        )
-        runner.run(svnBinary: svn, arguments: args, workingDirectory: workingDirectory, onOutput: { _ in }, completion: { [weak self] result in
-            Task { @MainActor in
-                guard let self else { return }
-                self.busyReason = nil
-                OperationLog.append(
-                    action: "获取状态",
-                    exitCode: Int(result.exitCode),
-                    paths: paths,
-                    output: result.output
-                )
+        prepareAuthThenRun(svn: svn, workingDirectory: workingDirectory, prepareTitle: "正在读取改动") { [weak self] in
+            guard let self else { return }
+            let args = ["status", "--xml", "--non-interactive", "--"] + paths
+            self.runner.run(svnBinary: svn, arguments: args, workingDirectory: workingDirectory, onOutput: { _ in }, completion: { [weak self] result in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.busyReason = nil
+                    OperationLog.append(
+                        action: "获取状态",
+                        exitCode: Int(result.exitCode),
+                        paths: paths,
+                        output: result.output
+                    )
 
-                if result.cancelled {
-                    controller.finish(title: "已取消")
-                    self.notify(title: "已取消")
-                    return
-                }
-                if result.exitCode != 0 {
-                    let body = self.appendAuthHintIfNeeded(to: result.output)
-                    controller.present(title: "无法获取改动", body: body, showCancel: false, onCancel: nil)
-                    self.notify(title: "无法获取改动")
-                    return
-                }
+                    if result.cancelled {
+                        controller.finish(title: "已取消")
+                        self.notify(title: "已取消")
+                        return
+                    }
+                    if result.exitCode != 0 {
+                        let body = self.appendAuthHintIfNeeded(to: result.output)
+                        controller.present(title: "无法获取改动", body: body, showCancel: false, onCancel: nil)
+                        self.notify(title: "无法获取改动")
+                        return
+                    }
 
-                controller.closeWindow()
-                do {
-                    let items = try SVNStatusParser.parse(xml: Data(result.output.utf8))
-                        .map { self.absolutizeStatusItem($0, workingDirectory: workingDirectory) }
-                    self.showCommitWindow(svn: svn, items: items, workingDirectory: workingDirectory)
-                } catch {
-                    self.showResult(title: "无法获取改动", body: error.localizedDescription, showCancel: false)
+                    controller.closeWindow()
+                    do {
+                        let items = try SVNStatusParser.parse(xml: Data(result.output.utf8))
+                            .map { self.absolutizeStatusItem($0, workingDirectory: workingDirectory) }
+                        self.showCommitWindow(svn: svn, items: items, workingDirectory: workingDirectory)
+                    } catch {
+                        self.showResult(title: "无法获取改动", body: error.localizedDescription, showCancel: false)
+                    }
                 }
-            }
-        })
+            })
+        }
     }
 
     private func absolutizeStatusItem(_ item: SVNStatusItem, workingDirectory: URL) -> SVNStatusItem {
@@ -279,40 +287,39 @@ final class AppModel: ObservableObject {
         })
         busyReason = "commit"
 
-        let args = svnArguments(
-            ["commit", "--non-interactive", "-m", message, "--"] + paths,
-            workingDirectory: workingDirectory,
-            svn: svn
-        )
-        runner.run(svnBinary: svn, arguments: args, workingDirectory: workingDirectory, onOutput: { [weak controller] chunk in
-            controller?.append(chunk)
-        }, completion: { [weak self] result in
-            Task { @MainActor in
-                guard let self else { return }
-                self.busyReason = nil
-                let title: String
-                if result.cancelled {
-                    title = "提交已取消"
-                } else if result.exitCode == 0 {
-                    title = "提交完成"
-                } else {
-                    title = "提交失败"
+        prepareAuthThenRun(svn: svn, workingDirectory: workingDirectory, prepareTitle: "正在提交") { [weak self] in
+            guard let self else { return }
+            let args = ["commit", "--non-interactive", "-m", message, "--"] + paths
+            self.runner.run(svnBinary: svn, arguments: args, workingDirectory: workingDirectory, onOutput: { [weak controller] chunk in
+                controller?.append(chunk)
+            }, completion: { [weak self] result in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.busyReason = nil
+                    let title: String
+                    if result.cancelled {
+                        title = "提交已取消"
+                    } else if result.exitCode == 0 {
+                        title = "提交完成"
+                    } else {
+                        title = "提交失败"
+                    }
+                    if result.exitCode != 0 && !result.cancelled {
+                        let body = self.appendAuthHintIfNeeded(to: controller.bodyText)
+                        controller.replaceBody(body)
+                    }
+                    controller.finish(title: title)
+                    OperationLog.append(
+                        action: "提交",
+                        exitCode: Int(result.exitCode),
+                        paths: paths,
+                        output: result.output,
+                        message: message
+                    )
+                    self.notify(title: title)
                 }
-                if result.exitCode != 0 && !result.cancelled {
-                    let body = self.appendAuthHintIfNeeded(to: controller.bodyText)
-                    controller.replaceBody(body)
-                }
-                controller.finish(title: title)
-                OperationLog.append(
-                    action: "提交",
-                    exitCode: Int(result.exitCode),
-                    paths: paths,
-                    output: result.output,
-                    message: message
-                )
-                self.notify(title: title)
-            }
-        })
+            })
+        }
     }
 
     private func appendAuthHintIfNeeded(to body: String) -> String {
