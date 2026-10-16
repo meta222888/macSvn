@@ -8,6 +8,7 @@ APP_NAME="SVN访达菜单"
 INSTALL_DIR="/Applications"
 DERIVED="$ROOT/build"
 SCHEME="SVN访达菜单"
+BUNDLE_ID="com.local.svnfindermenu.FinderSync"
 
 echo "==> Generating Xcode project"
 xcodegen generate
@@ -31,29 +32,48 @@ if [[ -z "$APP_SRC" ]]; then
   exit 1
 fi
 
-echo "==> Ad-hoc codesign"
-codesign --force --deep --sign - --entitlements "$ROOT/App/App.entitlements" "$APP_SRC"
 APPEX="$APP_SRC/Contents/PlugIns/SVNFinderSync.appex"
-if [[ -d "$APPEX" ]]; then
-  codesign --force --sign - --entitlements "$ROOT/FinderSync/FinderSync.entitlements" "$APPEX"
-  codesign --force --deep --sign - --entitlements "$ROOT/App/App.entitlements" "$APP_SRC"
+if [[ ! -d "$APPEX" ]]; then
+  echo "Finder Sync appex missing at $APPEX" >&2
+  exit 1
 fi
 
+echo "==> Ad-hoc codesign (appex last, never overwrite with app entitlements)"
+# Sign appex first with its own entitlements (sandbox required for Finder Sync).
+codesign --force --sign - --entitlements "$ROOT/FinderSync/FinderSync.entitlements" "$APPEX"
+# Sign the host app without --deep so the appex signature/entitlements stay intact.
+codesign --force --sign - --entitlements "$ROOT/App/App.entitlements" "$APP_SRC"
+
+echo "==> Verify entitlements"
+codesign -d --entitlements - "$APPEX" 2>&1 | rg -n "app-sandbox|temporary-exception|Dict|Bool|true|false" || true
+
 echo "==> Installing to ${INSTALL_DIR}"
-# Quit running instance if any
 osascript -e "tell application \"${APP_NAME}\" to quit" >/dev/null 2>&1 || true
 sleep 0.5
+
+# Drop stale PluginKit registrations that point at the build folder.
+pluginkit -r "$APPEX" 2>/dev/null || true
+pluginkit -r "${INSTALL_DIR}/${APP_NAME}.app/Contents/PlugIns/SVNFinderSync.appex" 2>/dev/null || true
+
 rm -rf "${INSTALL_DIR}/${APP_NAME}.app"
 cp -R "$APP_SRC" "${INSTALL_DIR}/"
 
-echo "==> Registering Finder Sync plugin"
-pluginkit -a "${INSTALL_DIR}/${APP_NAME}.app/Contents/PlugIns/SVNFinderSync.appex" || true
-pluginkit -e use -i com.local.svnfindermenu.FinderSync || true
+INSTALLED_APPEX="${INSTALL_DIR}/${APP_NAME}.app/Contents/PlugIns/SVNFinderSync.appex"
+echo "==> Registering Finder Sync from Applications"
+pluginkit -a "$INSTALLED_APPEX" || true
+pluginkit -e use -i "$BUNDLE_ID" || true
+
+echo "==> Restart Finder"
+killall Finder 2>/dev/null || true
+sleep 1
+
+echo "==> PluginKit status"
+pluginkit -mAvvv -i "$BUNDLE_ID" 2>&1 || true
 
 echo "==> Opening app"
 open "${INSTALL_DIR}/${APP_NAME}.app"
 
 echo ""
 echo "安装完成：${INSTALL_DIR}/${APP_NAME}.app"
-echo "请在「系统设置 → 通用 → 登录项与扩展 → 访达扩展」中打开「SVN 访达菜单」。"
-echo "若右键菜单未出现，可在应用内点击「重新启动访达」。"
+echo "请确认插件路径指向 /Applications（见上方 PluginKit status）。"
+echo "在已登记工作副本内右键应出现「SVN 更新」「SVN 提交」。"

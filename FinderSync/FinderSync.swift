@@ -20,10 +20,11 @@ final class FinderSyncExtension: FIFinderSync {
         DistributedNotificationCenter.default().removeObserver(defaultsObserver)
     }
 
+    /// Watch the home directory so the working-copy root itself (seen from its parent) still gets menus.
+    /// Visibility is still limited in `menu(for:)` to registered working copies only.
     static func refreshDirectoryURLs() {
-        let settings = AppSettings.load()
-        let urls = Set(settings.workingCopies.map { URL(fileURLWithPath: $0, isDirectory: true) })
-        FIFinderSyncController.default().directoryURLs = urls
+        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        FIFinderSyncController.default().directoryURLs = [home]
     }
 
     override func menu(for menuKind: FIMenuKind) -> NSMenu? {
@@ -98,7 +99,6 @@ final class FinderSyncExtension: FIFinderSync {
     }
 
     private func hostAppURL() -> URL? {
-        // …/SVN访达菜单.app/Contents/PlugIns/SVNFinderSync.appex
         let appex = Bundle.main.bundleURL
         let appURL = appex
             .deletingLastPathComponent()
