@@ -277,20 +277,52 @@ final class AppModel: ObservableObject {
         if commitController == nil {
             commitController = CommitWindowController()
         }
-        commitController?.present(items: items) { [weak self] message, selectedPaths in
-            self?.performCommit(svn: svn, message: message, paths: selectedPaths, workingDirectory: workingDirectory)
+        commitController?.present(items: items) { [weak self] message, selected in
+            self?.performCommit(svn: svn, message: message, selected: selected, workingDirectory: workingDirectory)
         }
     }
 
-    private func performCommit(svn: String, message: String, paths: [String], workingDirectory: URL) {
+    private func performCommit(
+        svn: String,
+        message: String,
+        selected: [SVNStatusItem],
+        workingDirectory: URL
+    ) {
+        let paths = selected.map(\.path)
+        let pathsToAdd = selected.filter { $0.item == "unversioned" }.map(\.path)
+
         let controller = ensureResultController()
-        controller.present(title: "正在提交", body: "", showCancel: true, onCancel: { [weak self] in
+        controller.present(title: pathsToAdd.isEmpty ? "正在提交" : "正在新增并提交", body: "", showCancel: true, onCancel: { [weak self] in
             self?.runner.cancel()
         })
         busyReason = "commit"
 
         prepareAuthThenRun(svn: svn, workingDirectory: workingDirectory, prepareTitle: "正在提交") { [weak self] in
             guard let self else { return }
+            self.runAddThenCommit(
+                svn: svn,
+                message: message,
+                paths: paths,
+                pathsToAdd: pathsToAdd,
+                workingDirectory: workingDirectory,
+                controller: controller
+            )
+        }
+    }
+
+    private func runAddThenCommit(
+        svn: String,
+        message: String,
+        paths: [String],
+        pathsToAdd: [String],
+        workingDirectory: URL,
+        controller: ResultWindowController
+    ) {
+        let startCommit = { [weak self] in
+            guard let self else { return }
+            controller.present(title: "正在提交", body: controller.bodyText, showCancel: true, onCancel: { [weak self] in
+                self?.runner.cancel()
+            })
             let args = ["commit", "--non-interactive", "-m", message, "--"] + paths
             self.runner.run(svnBinary: svn, arguments: args, workingDirectory: workingDirectory, onOutput: { [weak controller] chunk in
                 controller?.append(chunk)
@@ -322,6 +354,42 @@ final class AppModel: ObservableObject {
                 }
             })
         }
+
+        guard !pathsToAdd.isEmpty else {
+            startCommit()
+            return
+        }
+
+        let addArgs = ["add", "--non-interactive", "--force", "--"] + pathsToAdd
+        runner.run(svnBinary: svn, arguments: addArgs, workingDirectory: workingDirectory, onOutput: { [weak controller] chunk in
+            controller?.append(chunk)
+        }, completion: { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                OperationLog.append(
+                    action: "新增",
+                    exitCode: Int(result.exitCode),
+                    paths: pathsToAdd,
+                    output: result.output
+                )
+                if result.cancelled {
+                    self.busyReason = nil
+                    controller.finish(title: "提交已取消")
+                    self.notify(title: "提交已取消")
+                    return
+                }
+                if result.exitCode != 0 {
+                    self.busyReason = nil
+                    let body = self.appendAuthHintIfNeeded(to: controller.bodyText)
+                    controller.replaceBody(body)
+                    controller.finish(title: "新增失败")
+                    self.notify(title: "新增失败")
+                    return
+                }
+                controller.append("\n")
+                startCommit()
+            }
+        })
     }
 
     private func appendAuthHintIfNeeded(to body: String) -> String {

@@ -2,12 +2,13 @@ import AppKit
 
 final class CommitWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSTextViewDelegate {
     private var items: [SVNStatusItem] = []
-    private var onSubmit: ((String, [String]) -> Void)?
+    private var onSubmit: ((String, [SVNStatusItem]) -> Void)?
 
-    private let hintLabel = NSTextField(wrappingLabelWithString: "将提交勾选的改动。未纳入版本控制的文件不会提交。")
+    private let hintLabel = NSTextField(wrappingLabelWithString: "将提交勾选的改动。勾选「未纳入版本控制」的文件时，会先执行新增再提交。")
     private let emptyLabel = NSTextField(labelWithString: "没有可提交的改动")
     private let tableView = NSTableView()
     private let messageView = NSTextView()
+    private let messageLabel = NSTextField(labelWithString: "提交说明（可空）")
     private let commitButton = NSButton(title: "提交", target: nil, action: nil)
     private let cancelButton = NSButton(title: "取消", target: nil, action: nil)
 
@@ -54,7 +55,6 @@ final class CommitWindowController: NSWindowController, NSTableViewDataSource, N
         tableView.usesAlternatingRowBackgroundColors = true
         scroll.documentView = tableView
 
-        let messageLabel = NSTextField(labelWithString: "提交说明（必填）")
         let messageScroll = NSScrollView()
         messageScroll.hasVerticalScroller = true
         messageScroll.borderType = .bezelBorder
@@ -94,7 +94,7 @@ final class CommitWindowController: NSWindowController, NSTableViewDataSource, N
         updateCommitEnabled()
     }
 
-    func present(items: [SVNStatusItem], onSubmit: @escaping (String, [String]) -> Void) {
+    func present(items: [SVNStatusItem], onSubmit: @escaping (String, [SVNStatusItem]) -> Void) {
         self.items = items
         self.onSubmit = onSubmit
         messageView.string = ""
@@ -147,19 +147,16 @@ final class CommitWindowController: NSWindowController, NSTableViewDataSource, N
     }
 
     private func updateCommitEnabled() {
-        let messageOK = !messageView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let selected = items.contains { $0.isCommitSelectable && $0.isSelected }
-        commitButton.isEnabled = messageOK && selected
+        commitButton.isEnabled = selected
     }
 
     @objc private func commitClicked() {
+        let selected = items.filter { $0.isCommitSelectable && $0.isSelected }
+        guard !selected.isEmpty else { return }
         let message = messageView.string
-        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        let selectedPaths = items.filter { $0.isCommitSelectable && $0.isSelected }.map(\.path)
-        guard !selectedPaths.isEmpty else { return }
         window?.orderOut(nil)
-        onSubmit?(message, selectedPaths)
+        onSubmit?(message, selected)
         onSubmit = nil
     }
 

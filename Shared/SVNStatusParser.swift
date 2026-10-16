@@ -36,7 +36,8 @@ enum SVNStatusParser {
         case "replaced":
             return SVNStatusItem(path: raw.path, item: item, displayName: "替换", isCommitSelectable: true, isSelected: true)
         case "unversioned":
-            return SVNStatusItem(path: raw.path, item: item, displayName: "未纳入版本控制", isCommitSelectable: false, isSelected: false)
+            // Selectable: will be `svn add`ed before commit when checked.
+            return SVNStatusItem(path: raw.path, item: item, displayName: "未纳入版本控制", isCommitSelectable: true, isSelected: false)
         case "missing":
             return SVNStatusItem(path: raw.path, item: item, displayName: "文件缺失", isCommitSelectable: false, isSelected: false)
         case "conflicted":
