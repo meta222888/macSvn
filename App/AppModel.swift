@@ -15,7 +15,10 @@ final class AppModel: ObservableObject {
     let runner = SVNRunner()
     private var resultController: ResultWindowController?
     private var commitController: CommitWindowController?
-    private var authHint = "请先在终端对这个版本库成功操作一次，让 Subversion 记住凭据；本版本不保管密码。"
+    private var authHint = """
+    请先在终端对这个版本库成功操作一次，让 Subversion 记住凭据；本版本不保管密码。
+    若终端里已经可以操作，但这里仍提示无法取得用户名或密码：第一次使用时若弹出「钥匙串访问」授权，请选择「始终允许」，以便本应用读取终端已保存的 Subversion 凭据。
+    """
 
     private init() {
         settings = AppSettings.load()
@@ -166,6 +169,13 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func svnArguments(_ base: [String], workingDirectory: URL, svn: String) -> [String] {
+        var args = base
+        let auth = SVNAuthCache.credentials(forWorkingCopy: workingDirectory, svnBinary: svn)
+        SVNAuthCache.apply(to: &args, auth: auth)
+        return args
+    }
+
     private func startUpdate(svn: String, paths: [String], workingDirectory: URL) {
         let controller = ensureResultController()
         controller.present(title: "正在更新", body: "", showCancel: true, onCancel: { [weak self] in
@@ -173,7 +183,7 @@ final class AppModel: ObservableObject {
         })
         busyReason = "update"
 
-        let args = ["update", "--non-interactive", "--"] + paths
+        let args = svnArguments(["update", "--non-interactive", "--"] + paths, workingDirectory: workingDirectory, svn: svn)
         runner.run(svnBinary: svn, arguments: args, workingDirectory: workingDirectory, onOutput: { [weak controller] chunk in
             controller?.append(chunk)
         }, completion: { [weak self] result in
@@ -206,7 +216,11 @@ final class AppModel: ObservableObject {
         })
         busyReason = "status"
 
-        let args = ["status", "--xml", "--non-interactive", "--"] + paths
+        let args = svnArguments(
+            ["status", "--xml", "--non-interactive", "--"] + paths,
+            workingDirectory: workingDirectory,
+            svn: svn
+        )
         runner.run(svnBinary: svn, arguments: args, workingDirectory: workingDirectory, onOutput: { _ in }, completion: { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
@@ -265,7 +279,11 @@ final class AppModel: ObservableObject {
         })
         busyReason = "commit"
 
-        let args = ["commit", "--non-interactive", "-m", message, "--"] + paths
+        let args = svnArguments(
+            ["commit", "--non-interactive", "-m", message, "--"] + paths,
+            workingDirectory: workingDirectory,
+            svn: svn
+        )
         runner.run(svnBinary: svn, arguments: args, workingDirectory: workingDirectory, onOutput: { [weak controller] chunk in
             controller?.append(chunk)
         }, completion: { [weak self] result in

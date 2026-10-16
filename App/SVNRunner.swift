@@ -42,6 +42,10 @@ final class SVNRunner {
         } else {
             environment["PATH"] = extraPath
         }
+        // GUI-launched apps must use the real home so svn finds ~/.subversion.
+        environment["HOME"] = AppConstants.realHomeDirectory.path
+        environment["USER"] = NSUserName()
+        environment["LOGNAME"] = NSUserName()
         process.environment = environment
 
         let stdout = Pipe()
