@@ -114,6 +114,7 @@ final class AppModel: ObservableObject {
 
     func handleIncomingURL(_ url: URL) {
         guard url.scheme == AppConstants.urlScheme else { return }
+        AppDelegate.shared?.noteFinderActionStarting()
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let id = components.queryItems?.first(where: { $0.name == "id" })?.value else {
             showResult(title: "无法处理请求", body: "缺少请求编号", showCancel: false)
@@ -129,6 +130,7 @@ final class AppModel: ObservableObject {
     }
 
     func handleAction(_ action: PendingActionKind, paths: [String]) {
+        AppDelegate.shared?.noteFinderActionStarting()
         NSApp.activate(ignoringOtherApps: true)
 
         guard let svn = resolvedSVNPath ?? SVNBinaryLocator.resolve(preferred: settings.svnBinary) else {
