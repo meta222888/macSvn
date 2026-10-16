@@ -14,17 +14,59 @@ final class FinderSyncExtension: FIFinderSync {
         }
         super.init()
         FinderSyncExtension.refreshDirectoryURLs()
+        FinderSyncExtension.writeDebugProbe()
     }
 
     deinit {
         DistributedNotificationCenter.default().removeObserver(defaultsObserver)
     }
 
-    /// Watch the home directory so the working-copy root itself (seen from its parent) still gets menus.
-    /// Visibility is still limited in `menu(for:)` to registered working copies only.
+    /// Watch registered working copies, their parents, and the real home directory.
     static func refreshDirectoryURLs() {
-        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-        FIFinderSyncController.default().directoryURLs = [home]
+        let settings = AppSettings.load()
+        var urls = Set<URL>()
+        urls.insert(AppConstants.realHomeDirectory)
+        for path in settings.workingCopies {
+            let root = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+            urls.insert(root)
+            let parent = root.deletingLastPathComponent()
+            if parent.path != root.path {
+                urls.insert(parent)
+            }
+        }
+        FIFinderSyncController.default().directoryURLs = urls
+    }
+
+    private static func writeDebugProbe() {
+        let settings = AppSettings.load()
+        let lines = [
+            "time=\(ISO8601DateFormatter().string(from: Date()))",
+            "containerHome=\(NSHomeDirectory())",
+            "realHome=\(AppConstants.realHomeDirectory.path)",
+            "workingCopies=\(settings.workingCopies.joined(separator: ","))",
+            "directoryURLCount=\(FIFinderSyncController.default().directoryURLs?.count ?? -1)"
+        ]
+        let text = lines.joined(separator: "\n") + "\n"
+
+        let candidates = [
+            URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+                .appendingPathComponent("Library/Application Support/\(AppConstants.appSupportFolderName)/extension-debug.log"),
+            AppConstants.applicationSupportDirectory
+                .appendingPathComponent("extension-debug.log")
+        ]
+
+        for url in candidates {
+            do {
+                try FileManager.default.createDirectory(
+                    at: url.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try text.write(to: url, atomically: true, encoding: .utf8)
+            } catch {
+                continue
+            }
+        }
+        NSLog("SVNFinderSync probe workingCopies=%@ realHome=%@", settings.workingCopies.joined(separator: ","), AppConstants.realHomeDirectory.path)
     }
 
     override func menu(for menuKind: FIMenuKind) -> NSMenu? {

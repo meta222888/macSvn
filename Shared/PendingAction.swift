@@ -13,24 +13,55 @@ struct PendingAction: Codable, Equatable {
 
     static func store(action: PendingActionKind, paths: [String]) throws -> String {
         let id = UUID().uuidString
-        let dir = AppConstants.pendingDirectory
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let payload = PendingAction(id: id, action: action, paths: paths, createdAt: Date())
         let data = try JSONEncoder().encode(payload)
-        let url = dir.appendingPathComponent("\(id).json")
-        try data.write(to: url, options: .atomic)
+
+        var wrote = false
+        var lastError: Error?
+        for dir in [
+            AppConstants.pendingDirectory,
+            AppConstants.hostPendingDirectory
+        ] {
+            do {
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                try data.write(to: dir.appendingPathComponent("\(id).json"), options: .atomic)
+                wrote = true
+            } catch {
+                lastError = error
+            }
+        }
+        if !wrote {
+            throw lastError ?? NSError(domain: "PendingAction", code: 1)
+        }
         return id
     }
 
     static func load(id: String) throws -> PendingAction {
-        let url = AppConstants.pendingDirectory.appendingPathComponent("\(id).json")
-        let data = try Data(contentsOf: url)
-        return try JSONDecoder().decode(PendingAction.self, from: data)
+        let candidates = [
+            AppConstants.hostPendingDirectory.appendingPathComponent("\(id).json"),
+            AppConstants.pendingDirectory.appendingPathComponent("\(id).json"),
+            URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+                .appendingPathComponent("Library/Application Support/\(AppConstants.appSupportFolderName)/pending/\(id).json")
+        ]
+        for url in candidates where FileManager.default.fileExists(atPath: url.path) {
+            let data = try Data(contentsOf: url)
+            return try JSONDecoder().decode(PendingAction.self, from: data)
+        }
+        throw NSError(domain: "PendingAction", code: 2, userInfo: [
+            NSLocalizedDescriptionKey: "找不到请求 \(id)"
+        ])
     }
 
     static func remove(id: String) {
-        let url = AppConstants.pendingDirectory.appendingPathComponent("\(id).json")
-        try? FileManager.default.removeItem(at: url)
+        let candidates = [
+            AppConstants.hostPendingDirectory.appendingPathComponent("\(id).json"),
+            AppConstants.pendingDirectory.appendingPathComponent("\(id).json"),
+            URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+                .appendingPathComponent("Library/Application Support/\(AppConstants.appSupportFolderName)/pending/\(id).json")
+        ]
+        for url in candidates {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     var launchURL: URL {

@@ -7,31 +7,64 @@ struct AppSettings: Codable, Equatable {
     static let empty = AppSettings(svnBinary: "", workingCopies: [])
 
     static func load() -> AppSettings {
-        let url = AppConstants.settingsURL
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            return .empty
+        for url in candidateSettingsURLs() {
+            if let settings = read(from: url) {
+                return settings
+            }
         }
-        do {
-            let data = try Data(contentsOf: url)
-            return try JSONDecoder().decode(AppSettings.self, from: data)
-        } catch {
-            return .empty
-        }
+        return .empty
     }
 
     func save() throws {
-        let dir = AppConstants.applicationSupportDirectory
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(self)
-        try data.write(to: AppConstants.settingsURL, options: .atomic)
+
+        var lastError: Error?
+        var wrote = false
+        for dir in AppConstants.settingsMirrorDirectories {
+            do {
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                try data.write(to: dir.appendingPathComponent(AppConstants.settingsFileName), options: .atomic)
+                wrote = true
+            } catch {
+                lastError = error
+            }
+        }
+        if !wrote, let lastError {
+            throw lastError
+        }
+
         DistributedNotificationCenter.default().postNotificationName(
             Notification.Name(AppConstants.configDidChangeName),
             object: nil,
             userInfo: nil,
             deliverImmediately: true
         )
+    }
+
+    private static func candidateSettingsURLs() -> [URL] {
+        var urls: [URL] = [
+            // Inside the appex sandbox this resolves to the container copy.
+            URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+                .appendingPathComponent("Library/Application Support/\(AppConstants.appSupportFolderName)/\(AppConstants.settingsFileName)"),
+            AppConstants.extensionContainerSupportDirectory
+                .appendingPathComponent(AppConstants.settingsFileName),
+            AppConstants.settingsURL,
+            AppConstants.legacySettingsURL
+        ]
+        var seen = Set<String>()
+        return urls.filter { seen.insert($0.path).inserted }
+    }
+
+    private static func read(from url: URL) -> AppSettings? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        do {
+            let data = try Data(contentsOf: url)
+            return try JSONDecoder().decode(AppSettings.self, from: data)
+        } catch {
+            return nil
+        }
     }
 }
 
@@ -44,7 +77,7 @@ enum WorkingCopyResolver {
             current = current.deletingLastPathComponent()
         }
 
-        let home = URL(fileURLWithPath: NSHomeDirectory()).standardizedFileURL.path
+        let home = AppConstants.realHomeDirectory.path
         while true {
             let svnDir = current.appendingPathComponent(".svn", isDirectory: true)
             if FileManager.default.fileExists(atPath: svnDir.path) {

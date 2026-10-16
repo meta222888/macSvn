@@ -19,10 +19,13 @@ struct MacSvnApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         UNUserNotificationCenter.current().delegate = self
-        try? FileManager.default.createDirectory(
-            at: AppConstants.applicationSupportDirectory,
-            withIntermediateDirectories: true
-        )
+        // Migrate legacy settings and mirror them into App Group + extension container.
+        let settings = AppSettings.load()
+        try? settings.save()
+        Task { @MainActor in
+            AppModel.shared.settings = settings
+            AppModel.shared.refreshSVNPath()
+        }
         consumeLaunchArguments(CommandLine.arguments)
     }
 

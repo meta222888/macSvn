@@ -6,7 +6,9 @@
 	<true/>
 	<key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
 	<array>
+		<string>Library/Application Support/com.local.svnfindermenu/</string>
 		<string>Library/Application Support/SVN访达菜单/</string>
+		<string>Documents/</string>
 	</array>
 </dict>
 </plist>
